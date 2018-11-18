@@ -14,14 +14,18 @@
             <i-input v-model.number="txCount" class="tx-count-input" placeholder="10000 cost about 30 seconds"></i-input>
             <i-button v-show="txCount>0" @click="onBtnClick">{{txListIsReady?'Send':'Create'}}</i-button>
         </div>
-        <i-progress v-show="startTime>0" :percent="progress" :stroke-width="5">
-            <span>{{(endTime - startTime) / 1000}}s</span>
+        <i-progress v-show="txCount>0" class="tx-progress" :percent="progress" :stroke-width="5">
+            <span v-show="finishCount!==txCount">{{finishCount}}/{{txCount}}</span>
+            <span v-show="finishCount===txCount">{{(endTime - startTime) / 1000}}s</span>
         </i-progress>
     </div>
 </template>
 
 <script>
     import LemoClient from 'lemo-client'
+    import parallelLimit from 'async/parallelLimit';
+
+    const PRIVATE_KEY = '0xc21b6b2fbf230f665b936194d14da67187732bf9d28768aef1a3cbb26608f8aa'
 
     export default {
         name: 'app',
@@ -79,24 +83,29 @@
             async createTx() {
                 this.resetProgress()
                 const startTime = this.startTime
+                const unsignedConfigs = []
+                let totalAmount = 0
                 for (let i = this.txCount - 1; i >= 0; i--) {
                     const random = Math.random()
-                    const txConfig = await this.lemo.tx.sign('0xc21b6b2fbf230f665b936194d14da67187732bf9d28768aef1a3cbb26608f8aa', {
+                    const amount = Math.floor(random * 1000000000)
+                    totalAmount += amount
+                    unsignedConfigs.push({
                         expirationTime: startTime + Math.floor(random * 1800),
-                        amount: Math.floor(random * 1000000000),
+                        amount,
                         to: `0x${Math.floor(random * 10000)}`,
                     })
-                    this.signedTxList.push(txConfig)
                 }
+                // use time out to make sure the UI updated in time
+                const signFn = txConfig => timeoutPromise(0).then(() => this.lemo.tx.sign(PRIVATE_KEY, txConfig))
+                this.signedTxList = await runConcurrently(unsignedConfigs, signFn, 1000, () => this.finishCount++)
                 this.endTime = Date.now()
+                console.log('total amount', totalAmount)
             },
             async sendTx() {
                 this.resetProgress()
-                for (let i = this.txCount - 1; i >= 0; i--) {
-                    await this.lemo.tx.send(this.signedTxList[i])
-                    this.finishCount++
-                    this.endTime = Date.now()
-                }
+                const sendFn = txConfig => this.lemo.tx.send(txConfig)
+                await runConcurrently(this.signedTxList, sendFn, 1000, () => this.finishCount++)
+                this.endTime = Date.now()
             },
             resetProgress() {
                 this.startTime = Date.now()
@@ -114,8 +123,33 @@
         },
     }
 
+    async function runConcurrently(dataList, fn, concurrencyCount, onProgress) {
+        let finish = 0
+        const total = dataList.length
+        const asyncFunctions = dataList.map(item => {
+            return callback => {
+                fn(item).then(result => {
+                    onProgress(++finish, total)
+                    callback(null, result)
+                }, callback)
+            }
+        })
+        return new Promise((resolve, reject) => {
+            parallelLimit(asyncFunctions, concurrencyCount, (err, results) => {
+                if (err) {
+                    reject(err)
+                } else {
+                    resolve(results)
+                }
+            })
+        })
+    }
+
+    function timeoutPromise(timeout) {
+        return new Promise(resolve => setTimeout(resolve, timeout))
+    }
 </script>
-<style scoped>
+<style>
     #app {
         padding: 24px;
     }
@@ -123,5 +157,10 @@
     .tx-count-input {
         width: 300px;
         margin-right: 16px;
+    }
+
+    .tx-progress.ivu-progress-show-info .ivu-progress-outer {
+        padding-right: 80px;
+        margin-right: -80px;
     }
 </style>
